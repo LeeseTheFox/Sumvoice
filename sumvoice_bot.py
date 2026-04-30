@@ -3,7 +3,6 @@ import functools
 import json
 import logging
 import os
-import re
 import tempfile
 
 import requests
@@ -34,24 +33,60 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 # Admin ID with special privileges
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
-# Get whitelist settings from environment variables
-WHITELIST_ENABLED = os.getenv("WHITELIST_ENABLED", "false").lower() in (
-    "true",
-    "1",
-    "yes",
-    "on",
-)
-whitelist_str = os.getenv("WHITELIST_IDS", "")
-WHITELIST = [
-    int(user_id.strip())
-    for user_id in whitelist_str.split(",")
-    if user_id.strip().isdigit()
-]
+# Persistent data directory – whitelist state, session files, etc.
+DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+os.makedirs(DATA_DIR, exist_ok=True)
+WHITELIST_FILE = os.path.join(DATA_DIR, "whitelist.json")
 
-if WHITELIST_ENABLED:
-    logger.info(f"Whitelist enabled with {len(WHITELIST)} user IDs")
-else:
-    logger.info("Whitelist disabled - bot will respond to all users")
+
+def load_whitelist():
+    """Load whitelist state from data/whitelist.json.
+
+    Falls back to WHITELIST_ENABLED / WHITELIST_IDS env vars on first run
+    (so they can be used to seed the initial whitelist regardless of whether
+    the user is using a .env file or plain environment variables).
+    """
+    if os.path.exists(WHITELIST_FILE):
+        try:
+            with open(WHITELIST_FILE, "r") as f:
+                data = json.load(f)
+            enabled = bool(data.get("enabled", False))
+            ids = [int(x) for x in data.get("ids", [])]
+            logger.info(
+                f"Whitelist loaded from file – enabled={enabled}, {len(ids)} user(s)"
+            )
+            return enabled, ids
+        except Exception as e:
+            logger.error(f"Error reading whitelist file, falling back to env vars: {e}")
+
+    # First run or corrupted file – seed from env vars
+    enabled = os.getenv("WHITELIST_ENABLED", "false").lower() in (
+        "true",
+        "1",
+        "yes",
+        "on",
+    )
+    ids_str = os.getenv("WHITELIST_IDS", "")
+    ids = [int(uid.strip()) for uid in ids_str.split(",") if uid.strip().isdigit()]
+    if enabled:
+        logger.info(f"Whitelist seeded from env – enabled, {len(ids)} user(s)")
+    else:
+        logger.info("Whitelist seeded from env – disabled (bot responds to all users)")
+    return enabled, ids
+
+
+def save_whitelist(enabled, ids):
+    """Persist whitelist state to data/whitelist.json."""
+    try:
+        with open(WHITELIST_FILE, "w") as f:
+            json.dump({"enabled": enabled, "ids": ids}, f)
+        return True
+    except Exception as e:
+        logger.error(f"Error saving whitelist: {e}")
+        return False
+
+
+WHITELIST_ENABLED, WHITELIST = load_whitelist()
 
 # Validate admin configuration
 if ADMIN_ID == 0:
@@ -106,72 +141,6 @@ def ensure_env_file():
             return True
     except Exception as e:
         logger.error(f"Error ensuring .env file: {e}")
-        return False
-
-
-def update_env_whitelist(whitelist):
-    """Update the whitelist in the .env file."""
-    try:
-        # Ensure .env file exists
-        ensure_env_file()
-
-        # Read the current .env file
-        with open(ENV_FILE, "r") as f:
-            env_content = f.read()
-
-        # Create the new whitelist string
-        whitelist_str = ",".join(map(str, whitelist))
-
-        # Replace the WHITELIST_IDS line or add it if it doesn't exist
-        if "WHITELIST_IDS=" in env_content:
-            env_content = re.sub(
-                r"WHITELIST_IDS=.*", f"WHITELIST_IDS={whitelist_str}", env_content
-            )
-        else:
-            env_content += f"\nWHITELIST_IDS={whitelist_str}"
-
-        # Ensure WHITELIST_ENABLED setting exists
-        if "WHITELIST_ENABLED=" not in env_content:
-            env_content += f"\nWHITELIST_ENABLED=true"
-
-        # Write the updated content back to the .env file
-        with open(ENV_FILE, "w") as f:
-            f.write(env_content)
-
-        return True
-    except Exception as e:
-        logger.error(f"Error updating .env file: {e}")
-        return False
-
-
-def update_env_whitelist_enabled(enabled):
-    """Update the WHITELIST_ENABLED setting in the .env file."""
-    try:
-        # Ensure .env file exists
-        ensure_env_file()
-
-        # Read the current .env file
-        with open(ENV_FILE, "r") as f:
-            env_content = f.read()
-
-        # Convert boolean to string
-        enabled_str = "true" if enabled else "false"
-
-        # Replace the WHITELIST_ENABLED line or add it if it doesn't exist
-        if "WHITELIST_ENABLED=" in env_content:
-            env_content = re.sub(
-                r"WHITELIST_ENABLED=.*", f"WHITELIST_ENABLED={enabled_str}", env_content
-            )
-        else:
-            env_content += f"\nWHITELIST_ENABLED={enabled_str}"
-
-        # Write the updated content back to the .env file
-        with open(ENV_FILE, "w") as f:
-            f.write(env_content)
-
-        return True
-    except Exception as e:
-        logger.error(f"Error updating .env file: {e}")
         return False
 
 
@@ -270,11 +239,10 @@ async def whitelist_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             await update.message.reply_text(f"User {new_id} is already whitelisted.")
             return
 
-        # Add the user to the whitelist
+        # Add the user to the whitelist and persist
         WHITELIST.append(new_id)
 
-        # Update the .env file
-        if update_env_whitelist(WHITELIST):
+        if save_whitelist(WHITELIST_ENABLED, WHITELIST):
             await update.message.reply_text(
                 f"User {new_id} has been added to the whitelist."
             )
@@ -282,9 +250,8 @@ async def whitelist_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 f"Admin {update.effective_user.id} added user {new_id} to the whitelist"
             )
         else:
-            # If updating the .env fails, still keep the user in memory whitelist
             await update.message.reply_text(
-                f"User {new_id} has been added to the whitelist temporarily, but there was an error updating the configuration file."
+                f"User {new_id} has been added to the whitelist, but there was an error persisting the change."
             )
 
     except ValueError:
@@ -304,18 +271,16 @@ async def toggle_whitelist_command(
     global WHITELIST_ENABLED
 
     try:
-        # Toggle the current state
+        # Toggle the current state and persist
         new_state = not WHITELIST_ENABLED
 
-        # Update the .env file
-        if update_env_whitelist_enabled(new_state):
-            # Update the global variable
+        if save_whitelist(new_state, WHITELIST):
             WHITELIST_ENABLED = new_state
             status = "enabled" if new_state else "disabled"
             await update.message.reply_text(f"Whitelist has been {status}.")
             logger.info(f"Admin {update.effective_user.id} {status} the whitelist")
         else:
-            await update.message.reply_text("Failed to update the configuration file.")
+            await update.message.reply_text("Failed to persist the whitelist change.")
 
     except Exception as e:
         logger.error(f"Error in toggle whitelist command: {e}")

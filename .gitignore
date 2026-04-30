@@ -1,3 +1,8 @@
+# Data directory – contents are runtime-generated and must not be committed.
+# Mount this as a persistent volume when deploying.
+data/*
+!data/.gitkeep
+
 # Environment and Configuration Files
 .env
 *.env

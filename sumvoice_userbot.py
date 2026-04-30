@@ -9,6 +9,10 @@ from groq import Groq
 from pyrogram import Client, filters
 from pyrogram.types import Message
 
+# Session files are stored in data/ for persistence across redeployments
+DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+os.makedirs(DATA_DIR, exist_ok=True)
+
 # Load environment variables
 load_dotenv()
 
@@ -26,9 +30,9 @@ API_HASH = os.getenv("PYROGRAM_API_HASH")
 # Initialize Groq client
 groq_client = Groq(api_key=GROQ_API_KEY)
 
-# Initialize Pyrogram client
+# Initialize Pyrogram client (session file stored in data/ for persistence)
 app = Client(
-    "sumvoice_userbot",
+    os.path.join(DATA_DIR, "sumvoice_userbot"),
     api_id=API_ID,
     api_hash=API_HASH,
 )
